@@ -65,6 +65,12 @@ interface ChatMessageViewModel {
   collapsed?: boolean;
   toolCallIds?: string[];
   toolCallId?: string | null;
+  historyIndex?: number;
+}
+
+interface PendingRewrite {
+  messageId: string;
+  historyIndex: number;
 }
 
 @Component({
@@ -92,6 +98,8 @@ export class AIPanelComponent implements OnInit, OnDestroy {
   toolCalls: ToolCallViewModel[] = [];
   sending = false;
   lastError: string | null = null;
+  pendingRewrite: PendingRewrite | null = null;
+  messageMenu: { message: ChatMessageViewModel; x: number; y: number } | null = null;
 
   private chatSession: LLMChatSession | null = null;
   private currentAbortController: AbortController | null = null;
@@ -184,6 +192,8 @@ export class AIPanelComponent implements OnInit, OnDestroy {
     this.lastError = null;
     this.sending = true;
     this.currentAbortController = new AbortController();
+    this.messageMenu = null;
+    this.applyPendingRewrite();
     this.draftPrompt = "";
     this.resetTextareaHeight();
     this.clearStreamingDrafts();
@@ -192,6 +202,7 @@ export class AIPanelComponent implements OnInit, OnDestroy {
       role: "user",
       content: prompt,
       streaming: false,
+      historyIndex: this.chatSession.getHistory().length,
     });
 
     try {
@@ -386,10 +397,86 @@ export class AIPanelComponent implements OnInit, OnDestroy {
     this.messages = [];
     this.toolCalls = [];
     this.lastError = null;
+    this.pendingRewrite = null;
+    this.messageMenu = null;
     this.clearStreamingDrafts();
     this.cancelPendingApprovals();
     this.cancelPendingUserInputs();
     this.initializeSession();
+  }
+
+  openMessageMenu(event: MouseEvent, message: ChatMessageViewModel): void {
+    if (message.role !== "user" || this.sending || message.historyIndex == null) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    const container = (event.currentTarget as HTMLElement).closest(
+      ".ai-panel-container",
+    );
+    if (!container) {
+      return;
+    }
+
+    const rect = container.getBoundingClientRect();
+    this.messageMenu = {
+      message,
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    };
+  }
+
+  closeMessageMenu(): void {
+    this.messageMenu = null;
+  }
+
+  onPanelMouseDown(event: MouseEvent): void {
+    event.stopPropagation();
+    if (!this.messageMenu || event.button !== 0) {
+      return;
+    }
+    const target = event.target as HTMLElement | null;
+    if (target?.closest(".message-menu button")) {
+      return;
+    }
+    this.messageMenu = null;
+  }
+
+  editFromMenu(event: MouseEvent): void {
+    if (event.button !== 0 || !this.messageMenu) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    this.editUserMessage(this.messageMenu.message);
+  }
+
+  editUserMessage(message: ChatMessageViewModel): void {
+    this.messageMenu = null;
+    if (message.role !== "user" || this.sending || message.historyIndex == null) {
+      return;
+    }
+
+    this.pendingRewrite = {
+      messageId: message.id,
+      historyIndex: message.historyIndex,
+    };
+    this.draftPrompt = message.content;
+    this.lastError = null;
+    setTimeout(() => {
+      this.autoResizeTextarea();
+      this.focusPrompt();
+      const input = this.promptInput?.nativeElement;
+      if (input) {
+        const end = input.value.length;
+        input.setSelectionRange(end, end);
+      }
+    });
+  }
+
+  cancelRewrite(): void {
+    this.pendingRewrite = null;
   }
 
   approveToolCall(toolCallId: string): void {
@@ -689,6 +776,40 @@ export class AIPanelComponent implements OnInit, OnDestroy {
     } else {
       this.streamingReasoningMessageId = null;
     }
+  }
+
+  private applyPendingRewrite(): void {
+    const rewrite = this.pendingRewrite;
+    this.pendingRewrite = null;
+    if (!rewrite) {
+      return;
+    }
+
+    const index = this.messages.findIndex(
+      (message) => message.id === rewrite.messageId,
+    );
+    if (index === -1) {
+      return;
+    }
+
+    const removed = this.messages.slice(index);
+    const removedToolIds = new Set<string>();
+    for (const message of removed) {
+      for (const toolCallId of message.toolCallIds ?? []) {
+        removedToolIds.add(toolCallId);
+      }
+      if (message.toolCallId) {
+        removedToolIds.add(message.toolCallId);
+      }
+    }
+
+    this.messages = this.messages.slice(0, index);
+    if (removedToolIds.size) {
+      this.toolCalls = this.toolCalls.filter(
+        (toolCall) => !removedToolIds.has(toolCall.id),
+      );
+    }
+    this.chatSession?.truncateHistory(rewrite.historyIndex);
   }
 
   private appendMessage(message: ChatMessageViewModel): void {

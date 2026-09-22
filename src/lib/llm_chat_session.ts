@@ -441,6 +441,13 @@ export class LLMChatSession {
     return structuredClone(this.history);
   }
 
+  truncateHistory(index: number): void {
+    if (!Number.isInteger(index) || index < 0) {
+      return;
+    }
+    this.history.splice(index);
+  }
+
   private throwIfAborted(signal?: AbortSignal): void {
     if (signal?.aborted) {
       throw new DOMException("Operation was aborted.", "AbortError");
