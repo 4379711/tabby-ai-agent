@@ -107,6 +107,8 @@ export class AIPanelComponent implements OnInit, OnDestroy {
   >();
   private pendingUserInputs = new Map<string, PendingUserInputRequest>();
   private hotkeySubscription: Subscription | null = null;
+  private imeComposing = false;
+  private imeCompositionTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private config: ConfigService,
@@ -135,6 +137,7 @@ export class AIPanelComponent implements OnInit, OnDestroy {
   ngOnDestroy(): void {
     this.hotkeySubscription?.unsubscribe();
     this.hotkeySubscription = null;
+    this.clearImeCompositionTimer();
     this.currentAbortController?.abort();
     this.cancelPendingApprovals();
     this.cancelPendingUserInputs();
@@ -318,10 +321,59 @@ export class AIPanelComponent implements OnInit, OnDestroy {
     this.cancelPendingUserInputs();
   }
 
+  handleImeCompositionStart(): void {
+    this.clearImeCompositionTimer();
+    this.imeComposing = true;
+  }
+
+  handleImeCompositionEnd(): void {
+    // macOS/Chromium can dispatch the confirming Enter after compositionend,
+    // with isComposing already false. Keep the flag until that keydown is handled.
+    this.clearImeCompositionTimer();
+    this.imeCompositionTimer = setTimeout(() => {
+      this.imeComposing = false;
+      this.imeCompositionTimer = null;
+    });
+  }
+
   handleComposerKeydown(event: KeyboardEvent): void {
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (event.key !== "Enter" || event.shiftKey) {
+      return;
+    }
+    if (this.consumeImeEnter(event)) {
+      return;
+    }
+    event.preventDefault();
+    void this.sendMessage();
+  }
+
+  handleAskUserKeydown(event: KeyboardEvent, toolCallId: string): void {
+    if (event.key !== "Enter") {
+      return;
+    }
+    if (this.consumeImeEnter(event)) {
+      return;
+    }
+    event.preventDefault();
+    this.submitUserAnswer(toolCallId);
+  }
+
+  private consumeImeEnter(event: KeyboardEvent): boolean {
+    const duringComposition = event.isComposing || event.keyCode === 229;
+    if (!duringComposition && !this.imeComposing) {
+      return false;
+    }
+    // compositionend has already committed the candidate. Block the extra newline.
+    if (!duringComposition) {
       event.preventDefault();
-      void this.sendMessage();
+    }
+    return true;
+  }
+
+  private clearImeCompositionTimer(): void {
+    if (this.imeCompositionTimer !== null) {
+      clearTimeout(this.imeCompositionTimer);
+      this.imeCompositionTimer = null;
     }
   }
 
