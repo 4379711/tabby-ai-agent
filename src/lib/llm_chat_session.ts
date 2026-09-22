@@ -1,10 +1,18 @@
 import { Tool } from "./tool_types";
 import defaultSystemPromptTemplate from "../prompts/default_system_prompt.md";
+import { ApiStyle } from "../config";
 import {
   buildChatCompletionsUrl,
   buildCheckpointRequestBody,
+  buildResponsesUrl,
   normalizeOpenAIBaseUrl,
 } from "./llm_endpoint";
+import {
+  applyResponsesEvent,
+  buildResponsesCheckpointBody,
+  buildResponsesRequestBody,
+  createResponsesParseState,
+} from "./llm_responses";
 
 export interface LLMHistoryItem {
   role: "system" | "user" | "assistant" | "tool" | "reasoning";
@@ -45,18 +53,26 @@ function buildRequestHeaders(apiToken?: string): Record<string, string> {
 export async function checkpointLLMEndpoint(
   baseUrl: string,
   apiToken?: string,
-  model = "default",
+  model = "",
+  apiStyle: ApiStyle = "completions",
 ): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
 
   try {
-    const response = await fetch(buildChatCompletionsUrl(baseUrl), {
+    const response = await fetch(
+      apiStyle === "responses" ? buildResponsesUrl(baseUrl) : buildChatCompletionsUrl(baseUrl),
+      {
       method: "POST",
       headers: buildRequestHeaders(apiToken),
       signal: controller.signal,
-      body: JSON.stringify(buildCheckpointRequestBody(model)),
-    });
+      body: JSON.stringify(
+        apiStyle === "responses"
+          ? buildResponsesCheckpointBody(model)
+          : buildCheckpointRequestBody(model),
+      ),
+    },
+    );
 
     if (!response.ok) {
       const errorBody = await response.text();
@@ -78,6 +94,7 @@ export class LLMChatSession {
   private apiToken: string;
   private model: string;
   private extraParameters: Record<string, any> = {};
+  private apiStyle: ApiStyle;
   toolCalls: { name: string; args: any; output: string }[] = [];
   tools: Tool[];
   toolSchema: any[];
@@ -87,14 +104,16 @@ export class LLMChatSession {
     systemPrompt: string,
     tools: Tool[],
     apiToken?: string,
-    model = "default",
+    model = "",
     extraParameters?: Record<string, any>,
     history?: LLMHistoryItem[],
+    apiStyle: ApiStyle = "completions",
   ) {
     this.baseUrl = normalizeOpenAIBaseUrl(baseUrl);
     this.apiToken = apiToken?.trim() ?? "";
-    this.model = model.trim() || "default";
+    this.model = model.trim();
     this.extraParameters = extraParameters || {};
+    this.apiStyle = apiStyle;
     this.tools = tools;
     this.toolSchema = buildToolSchema(this.tools || []);
 
@@ -176,6 +195,21 @@ export class LLMChatSession {
 
     while (true) {
       this.throwIfAborted(options.signal);
+      if (this.apiStyle === "responses") {
+        const turn = await this.collectResponsesTurn(options);
+        const turnResult = await this.finishTurn(
+          options,
+          pushHistory,
+          turn.fullContent,
+          turn.fullReasoning,
+          turn.finishReason,
+          turn.requestedToolCalls,
+        );
+        if (turnResult.done) {
+          return turnResult.content;
+        }
+        continue;
+      }
       const response = await fetch(buildChatCompletionsUrl(this.baseUrl), {
         method: "POST",
         headers: buildRequestHeaders(this.apiToken),
@@ -189,8 +223,10 @@ export class LLMChatSession {
         }),
       });
       if (!response.ok) {
-        console.log(this.history);
-        throw new Error(`API error: ${response.status} ${response.statusText}`);
+        const errorBody = await response.text();
+        throw new Error(
+          `API error: ${response.status} ${response.statusText}${errorBody ? ` - ${errorBody}` : ""}`,
+        );
       }
       const reader = response.body!.getReader();
       const decoder = new TextDecoder();
@@ -268,7 +304,166 @@ export class LLMChatSession {
         }
       }
 
-      if (fullReasoning)
+      const turnResult = await this.finishTurn(
+        options,
+        pushHistory,
+        fullContent,
+        fullReasoning,
+        finishReason,
+        requestedToolCalls,
+      );
+      if (turnResult.done) {
+        return turnResult.content;
+      }
+    }
+  }
+
+  private async collectResponsesTurn(options: {
+    silent?: boolean;
+    onToken?: (token: string) => Promise<void>;
+    onReasoningToken?: (token: string) => Promise<void>;
+    signal?: AbortSignal;
+  }): Promise<{
+    fullContent: string;
+    fullReasoning: string;
+    finishReason: "tool_calls" | "stop";
+    requestedToolCalls: Record<number, ToolCallAccumulator>;
+  }> {
+    const response = await fetch(buildResponsesUrl(this.baseUrl), {
+      method: "POST",
+      headers: buildRequestHeaders(this.apiToken),
+      signal: options.signal,
+      body: JSON.stringify(
+        buildResponsesRequestBody({
+          model: this.model,
+          history: this.history,
+          tools: this.tools,
+          extraParameters: this.extraParameters,
+        }),
+      ),
+    });
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(
+        `API error: ${response.status} ${response.statusText}${errorBody ? ` - ${errorBody}` : ""}`,
+      );
+    }
+
+    const state = createResponsesParseState();
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let lastStdoutWasReasoning = false;
+    const consume = async (payload: string) => {
+      let event: any;
+      try {
+        event = JSON.parse(payload);
+      } catch {
+        console.warn("Failed to parse chunk:", payload);
+        return;
+      }
+      const applied = applyResponsesEvent(state, event);
+      if (applied.reasoning) {
+        if (!options.silent) {
+          process.stdout.write(applied.reasoning);
+          lastStdoutWasReasoning = true;
+        }
+        if (options.onReasoningToken) {
+          await options.onReasoningToken(applied.reasoning);
+        }
+      } else if (applied.content) {
+        if (!options.silent) {
+          if (lastStdoutWasReasoning) {
+            process.stdout.write("\n");
+            lastStdoutWasReasoning = false;
+          }
+          process.stdout.write(applied.content);
+        }
+        if (options.onToken) {
+          await options.onToken(applied.content);
+        }
+      }
+    };
+
+    while (true) {
+      this.throwIfAborted(options.signal);
+      const { done, value } = await reader.read();
+      if (done) {
+        buffer += decoder.decode();
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const data = sseData(line);
+        if (data) {
+          await consume(data);
+        }
+      }
+    }
+    const tail = sseData(buffer);
+    if (tail) {
+      await consume(tail);
+    }
+    if (state.failedMessage) {
+      throw new Error(state.failedMessage);
+    }
+
+    const requestedToolCalls: Record<number, ToolCallAccumulator> = {};
+    state.toolCalls
+      .filter((call) => call.name)
+      .forEach((call, index) => {
+        requestedToolCalls[index] = {
+          id: call.id,
+          type: "function",
+          function: {
+            name: call.name,
+            arguments: call.arguments.trim() || "{}",
+          },
+        };
+      });
+
+    return {
+      fullContent: state.content,
+      fullReasoning: state.reasoning,
+      finishReason: Object.keys(requestedToolCalls).length ? "tool_calls" : "stop",
+      requestedToolCalls,
+    };
+  }
+
+  private async finishTurn(
+    options: {
+      silent?: boolean;
+      onToolCall?: (
+        toolCallId: string,
+        toolName: string,
+        args: any,
+      ) => Promise<boolean>;
+      onToolResult?: (
+        toolCallId: string,
+        toolName: string,
+        args: any,
+        output: string,
+      ) => Promise<void>;
+      onToolError?: (
+        toolCallId: string,
+        fullText: string,
+        toolName: string,
+        args: any,
+        errorMessage: string,
+        stackTrace: string,
+      ) => Promise<void>;
+      simulatedMode?: boolean;
+      signal?: AbortSignal;
+    },
+    pushHistory: (message: LLMHistoryItem) => Promise<void>,
+    fullContent: string,
+    fullReasoning: string,
+    finishReason: "tool_calls" | "stop" | null,
+    requestedToolCalls: Record<number, ToolCallAccumulator>,
+  ): Promise<{ done: true; content: string } | { done: false }> {
+    if (fullReasoning)
         await pushHistory({ role: "reasoning", content: fullReasoning });
 
       if (finishReason === "tool_calls") {
@@ -371,7 +566,7 @@ export class LLMChatSession {
             tool_call_id: toolCallId,
           });
           if (stopAfterToolResult) {
-            return fullContent;
+            return { done: true, content: fullContent };
           }
         }
         } catch (error) {
@@ -383,16 +578,15 @@ export class LLMChatSession {
           }
           throw error;
         }
-        continue;
+        return { done: false };
       } else if (finishReason === "stop") {
         // Normal completion
         await pushHistory({ role: "assistant", content: fullContent.trim() });
         if (!options.silent) process.stdout.write("\n");
-        return fullContent;
+        return { done: true, content: fullContent };
       } else {
         throw new Error("Unknown finish reason: " + finishReason);
       }
-    }
   }
 
   async warmup(): Promise<void> {
@@ -453,6 +647,18 @@ export class LLMChatSession {
       (error instanceof Error && error.name === "AbortError")
     );
   }
+}
+
+function sseData(line: string): string | null {
+  const trimmed = line.replace(/\r$/, "").trim();
+  if (!trimmed.startsWith("data:")) {
+    return null;
+  }
+  const data = trimmed.slice(5).trim();
+  if (!data || data === "[DONE]") {
+    return null;
+  }
+  return data;
 }
 
 function buildToolSchema(tools: Tool[]) {

@@ -37,12 +37,28 @@
     <div class="setting-copy">
       <div class="setting-kicker">Connection</div>
       <div class="title">LLM endpoint</div>
-      <div class="description">
+      <div class="description" *ngIf="apiStyle === 'completions'">
         Enter the base URL for your OpenAI-compatible API. The plugin sends
         streamed chat requests to
         <code>/v1/chat/completions</code> automatically, so do not include that
         path here.
       </div>
+      <div class="description" *ngIf="apiStyle === 'responses'">
+        Enter the base URL for your OpenAI-compatible API. The plugin sends
+        streamed requests to <code>/v1/responses</code> automatically, so do
+        not include that path here.
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <label class="input-label">API</label>
+      <button type="button" class="api-switch" (click)="toggleApiStyle()">
+        <span [class.active]="apiStyle === 'completions'">Chat Completions</span>
+        <span class="api-switch-track" [class.responses]="apiStyle === 'responses'">
+          <span class="api-switch-knob"></span>
+        </span>
+        <span [class.active]="apiStyle === 'responses'">Responses</span>
+      </button>
     </div>
 
     <div class="input-wrap">
@@ -63,7 +79,8 @@
         </div>
         <div>
           <span class="hint-label">Not</span>
-          <code>http://127.0.0.1:4000/v1/chat/completions</code>
+          <code *ngIf="apiStyle === 'completions'">http://127.0.0.1:4000/v1/chat/completions</code>
+          <code *ngIf="apiStyle === 'responses'">http://127.0.0.1:4000/v1/responses</code>
         </div>
       </div>
       <div
@@ -96,15 +113,17 @@
         type="password"
         placeholder="sk-..."
         autocomplete="off"
-        [ngModel]="apiToken"
+        [ngModel]="config.store.aiAgent.apiToken"
         (ngModelChange)="saveApiToken($event)"
       />
       <div class="help-panel">
         <div class="help-title">How it is sent</div>
         <div>
           When set, the plugin adds an
-          <code>Authorization: Bearer &lt;token&gt;</code> header to checkpoint,
-          warmup, and chat completion requests.
+          <code>Authorization: Bearer &lt;token&gt;</code> header to every
+          <span *ngIf="apiStyle === 'completions'">chat completion</span>
+          <span *ngIf="apiStyle === 'responses'">Responses</span>
+          request.
         </div>
       </div>
     </div>
@@ -115,8 +134,8 @@
       <div class="setting-kicker">Provider</div>
       <div class="title">Model name</div>
       <div class="description">
-        Model id sent with every request. Commercial providers usually require a
-        real model name instead of <code>default</code>.
+        Model id sent with every request. Use the provider's model id. An empty
+        value is not sent as a model name.
       </div>
     </div>
 
@@ -127,7 +146,7 @@
         class="form-control"
         type="text"
         placeholder="gpt-4.1-mini"
-        [ngModel]="model"
+        [ngModel]="config.store.aiAgent.model"
         (ngModelChange)="saveModel($event)"
       />
       <div class="help-panel">
@@ -287,7 +306,7 @@
         rows="6"
         spellcheck="false"
         placeholder="Prefer terse answers. Ask before running package managers."
-        [ngModel]="additionalSystemPrompt"
+        [ngModel]="config.store.aiAgent.additionalSystemPrompt"
         (ngModelChange)="saveAdditionalSystemPrompt($event)"
       ></textarea>
       <div class="help-panel">
@@ -306,9 +325,15 @@
       <div class="setting-kicker">Model tuning</div>
       <div class="title">Additional request parameters</div>
       <div class="description">
-        Optional JSON merged into every streamed chat completion request. This
-        is useful for LiteLLM, llama.cpp, vLLM, or other providers that expose
-        extra sampling, reasoning, or template controls.
+        <span *ngIf="apiStyle === 'completions'">
+          Optional JSON merged into every streamed
+          <code>/v1/chat/completions</code> request.
+        </span>
+        <span *ngIf="apiStyle === 'responses'">
+          Optional JSON merged into every streamed <code>/v1/responses</code>
+          request.
+        </span>
+        Use it for sampling, thinking depth, or other provider controls.
       </div>
     </div>
 
@@ -321,24 +346,22 @@
         class="form-control json-textarea"
         rows="8"
         spellcheck="false"
-        placeholder='{
-  "chat_template_kwargs": { "enable_thinking": true },
-  "thinking_budget_tokens": 100,
-  "temperature": 1.0,
-  "top_p": 0.95,
-  "top_k": 64
-}'
-        [ngModel]="additionalRequestParametersText"
+        [placeholder]="requestParametersPlaceholder"
+        [ngModel]="config.store.aiAgent.additionalRequestParametersText"
         (ngModelChange)="saveAdditionalRequestParametersText($event)"
       ></textarea>
       <div class="help-panel">
         <div class="help-title">What goes here?</div>
         <div>
-          Use strict JSON with quoted keys. Leave this empty to send only the
-          plugin defaults. Common keys include <code>temperature</code>,
-          <code>top_p</code>, <code>top_k</code>,
-          <code>thinking_budget_tokens</code>, and
-          <code>chat_template_kwargs</code>.
+          Leave this empty to send no extra parameters. That is valid and does
+          not raise an error.
+          <span *ngIf="apiStyle === 'completions'">
+            Thinking depth is <code>reasoning_effort</code>.
+          </span>
+          <span *ngIf="apiStyle === 'responses'">
+            Thinking depth is <code>reasoning.effort</code>, including
+            <code>max</code>.
+          </span>
         </div>
       </div>
       <div class="validation-error" *ngIf="additionalRequestParametersError">

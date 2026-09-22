@@ -2,8 +2,22 @@ import { ConfigProvider, Platform } from "tabby-core";
 
 export type AIProvider = "openrouter" | "litellm";
 export type PanelPosition = "left" | "right" | "top" | "bottom";
+export type ApiStyle = "completions" | "responses";
+
+export interface ApiProfileConfig {
+  llmEndpoint: string;
+  apiToken: string;
+  model: string;
+  additionalRequestParametersText: string;
+  additionalRequestParameters: Record<string, any>;
+  additionalSystemPrompt: string;
+}
 
 export interface AIAgentConfig {
+  apiStyle: ApiStyle;
+  apiProfilesReady: boolean;
+  completions: ApiProfileConfig;
+  responses: ApiProfileConfig;
   llmEndpoint: string;
   apiToken: string;
   model: string;
@@ -16,12 +30,62 @@ export interface AIAgentConfig {
   hideTerminalOutput: boolean;
 }
 
+export function emptyApiProfile(): ApiProfileConfig {
+  return {
+    llmEndpoint: "",
+    apiToken: "",
+    model: "",
+    additionalRequestParametersText: "",
+    additionalRequestParameters: {},
+    additionalSystemPrompt: "",
+  };
+}
+
+export function ensureAiAgentProfiles(aiAgent: any): boolean {
+  if (!aiAgent) {
+    return false;
+  }
+
+  const style: ApiStyle = aiAgent.apiStyle === "responses" ? "responses" : "completions";
+  if (aiAgent.apiStyle === style) {
+    return false;
+  }
+
+  aiAgent.apiStyle = style;
+  return true;
+}
+
+export function getActiveProfile(aiAgent: any): ApiProfileConfig {
+  return {
+    llmEndpoint: typeof aiAgent?.llmEndpoint === "string" ? aiAgent.llmEndpoint : "",
+    apiToken: typeof aiAgent?.apiToken === "string" ? aiAgent.apiToken : "",
+    model: typeof aiAgent?.model === "string" ? aiAgent.model : "",
+    additionalRequestParametersText:
+      typeof aiAgent?.additionalRequestParametersText === "string"
+        ? aiAgent.additionalRequestParametersText
+        : "",
+    additionalRequestParameters: isPlainObject(aiAgent?.additionalRequestParameters)
+      ? aiAgent.additionalRequestParameters
+      : {},
+    additionalSystemPrompt:
+      typeof aiAgent?.additionalSystemPrompt === "string" ? aiAgent.additionalSystemPrompt : "",
+  };
+}
+
+function isPlainObject(value: unknown): value is Record<string, any> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export class AIAgentConfigProvider extends ConfigProvider {
   defaults = {
     aiAgent: {
+      apiStyle: "completions" as ApiStyle,
+      apiProfilesReady: false,
+      completions: { __nonStructural: true, ...emptyApiProfile() },
+      responses: { __nonStructural: true, ...emptyApiProfile() },
       llmEndpoint: "",
       apiToken: "",
-      model: "default",
+      model: "",
       autoApproveLowRiskCommands: false,
       additionalRequestParametersText: "",
       additionalRequestParameters: {},
