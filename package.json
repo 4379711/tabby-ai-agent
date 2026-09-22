@@ -9,7 +9,7 @@
   "scripts": {
     "build": "webpack --progress --color",
     "watch": "webpack --progress --color --watch",
-    "test": "node --experimental-strip-types tests/llm_endpoint.test.ts"
+    "test": "node tests/run.cjs tests/llm_endpoint.test.ts tests/llm_stream.test.ts"
   },
   "type": "commonjs",
   "publishConfig": {
