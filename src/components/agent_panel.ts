@@ -9,6 +9,7 @@ import {
   ElementRef,
 } from "@angular/core";
 import { ConfigService, HotkeysService } from "tabby-core";
+import { ensureAiAgentProfiles } from "../config";
 import { BaseTerminalTabComponent, Frontend } from "tabby-terminal";
 import { GetTerminalLinesTool } from "../lib/get_terminal_lines.tool";
 import {
@@ -117,6 +118,7 @@ export class AIPanelComponent implements OnInit, OnDestroy {
   private hotkeySubscription: Subscription | null = null;
   private imeComposing = false;
   private imeCompositionTimer: ReturnType<typeof setTimeout> | null = null;
+  private boundSessionSignature = "";
 
   constructor(
     private config: ConfigService,
@@ -126,15 +128,13 @@ export class AIPanelComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.config.store.aiAgent ??= {};
-    this.config.store.aiAgent.llmEndpoint ??= "";
-    this.config.store.aiAgent.apiToken ??= "";
-    this.config.store.aiAgent.model ??= "default";
+    const migrated = ensureAiAgentProfiles(this.config.store.aiAgent);
     this.config.store.aiAgent.autoApproveLowRiskCommands ??= false;
-    this.config.store.aiAgent.additionalRequestParametersText ??= "";
-    this.config.store.aiAgent.additionalRequestParameters ??= {};
-    this.config.store.aiAgent.additionalSystemPrompt ??= "";
     this.config.store.aiAgent.hideTerminalOutput ??= false;
-    this.initializeSession();
+    if (migrated) {
+      void this.config.save();
+    }
+    this.syncSession();
     this.hotkeySubscription = this.hotkeys.hotkey$.subscribe((hotkey) => {
       if (hotkey === "force-read-terminal" && this.frontend) {
         this.terminalContext.forceReadFor(this.frontend);
@@ -183,8 +183,11 @@ export class AIPanelComponent implements OnInit, OnDestroy {
       return;
     }
 
-    if (!this.chatSession) {
-      this.initializeSession();
+    try {
+      this.syncSession();
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error);
+      return;
     }
 
     if (!this.chatSession) {
@@ -455,6 +458,7 @@ export class AIPanelComponent implements OnInit, OnDestroy {
     this.cancelPendingApprovals();
     this.cancelPendingUserInputs();
     this.initializeSession();
+    this.boundSessionSignature = this.chatSession ? this.sessionSignature() : "";
   }
 
   openMessageMenu(event: MouseEvent, message: ChatMessageViewModel): void {
@@ -666,7 +670,34 @@ export class AIPanelComponent implements OnInit, OnDestroy {
       .filter((toolCall): toolCall is ToolCallViewModel => Boolean(toolCall));
   }
 
-  private initializeSession(): void {
+  private syncSession(): void {
+    ensureAiAgentProfiles(this.config.store.aiAgent);
+    const signature = this.sessionSignature();
+    if (this.chatSession && this.boundSessionSignature === signature) {
+      return;
+    }
+
+    const priorHistory =
+      this.chatSession
+        ?.getHistory()
+        .filter((item) => item.role !== "system") ?? [];
+    this.initializeSession(priorHistory);
+    this.boundSessionSignature = this.chatSession ? signature : "";
+  }
+
+  private sessionSignature(): string {
+    const aiAgent = this.config.store.aiAgent ?? {};
+    return JSON.stringify({
+      apiStyle: this.getApiStyle(),
+      endpoint: aiAgent.llmEndpoint ?? "",
+      apiToken: aiAgent.apiToken ?? "",
+      model: aiAgent.model ?? "",
+      prompt: aiAgent.additionalSystemPrompt ?? "",
+      params: aiAgent.additionalRequestParameters ?? {},
+    });
+  }
+
+  private initializeSession(history: LLMHistoryItem[] = []): void {
     const endpoint = this.getEndpoint();
     if (!endpoint || !this.terminal || !this.frontend) {
       this.chatSession = null;
@@ -690,7 +721,13 @@ export class AIPanelComponent implements OnInit, OnDestroy {
       this.getApiToken(),
       this.getModel(),
       this.getAdditionalRequestParameters(),
+      history,
+      this.getApiStyle(),
     );
+  }
+
+  private getApiStyle(): "completions" | "responses" {
+    return this.config.store.aiAgent?.apiStyle === "responses" ? "responses" : "completions";
   }
 
   private getEndpoint(): string {
@@ -715,7 +752,7 @@ export class AIPanelComponent implements OnInit, OnDestroy {
   }
 
   private getModel(): string {
-    return this.config.store.aiAgent?.model?.trim?.() || "default";
+    return this.config.store.aiAgent?.model?.trim?.() ?? "";
   }
 
   private getAdditionalSystemPrompt(): string {
