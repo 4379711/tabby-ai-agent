@@ -185,7 +185,9 @@
                     type="text"
                     [ngModel]="getPendingUserAnswer(toolCall.id)"
                     (ngModelChange)="updatePendingUserAnswer(toolCall.id, $event)"
-                    (keydown.enter)="submitUserAnswer(toolCall.id)"
+                    (compositionstart)="handleImeCompositionStart()"
+                    (compositionend)="handleImeCompositionEnd()"
+                    (keydown)="handleAskUserKeydown($event, toolCall.id)"
                     placeholder="Type your answer"
                   />
                   <button
@@ -235,6 +237,8 @@
       rows="1"
       placeholder="Send a prompt. Shift+Enter for a new line."
       (input)="autoResizeTextarea()"
+      (compositionstart)="handleImeCompositionStart()"
+      (compositionend)="handleImeCompositionEnd()"
       (keydown)="handleComposerKeydown($event)"
     ></textarea>
       <button
