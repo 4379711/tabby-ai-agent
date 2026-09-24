@@ -5,22 +5,20 @@ import {
   buildCheckpointRequestBody,
   normalizeOpenAIBaseUrl,
 } from "./llm_endpoint";
+import {
+  applyStreamChoice,
+  consumeSseBuffer,
+  flushSseBuffer,
+  StreamParseState,
+  StreamToolCall,
+} from "./llm_stream";
 
 export interface LLMHistoryItem {
   role: "system" | "user" | "assistant" | "tool" | "reasoning";
   content: string | null | any[];
   tool_call_id?: string | null;
-  tool_calls?: ToolCallAccumulator[] | null;
+  tool_calls?: StreamToolCall[] | null;
 }
-
-type ToolCallAccumulator = {
-  id: string;
-  type: "function";
-  function: {
-    name: string;
-    arguments: string;
-  };
-};
 
 export function buildSystemPrompt(additionalPrompt?: string): string {
   const parts = [defaultSystemPromptTemplate.trim()];
@@ -196,82 +194,83 @@ export class LLMChatSession {
       const decoder = new TextDecoder();
       let fullContent = "";
       let fullReasoning = "";
-      const requestedToolCalls: Record<number, ToolCallAccumulator> = {};
-      let finishReason: "tool_calls" | "stop" | null = null;
+      const streamState: StreamParseState = {
+        requestedToolCalls: {},
+        finishReason: null,
+      };
+      let sseBuffer = "";
       let lastStdoutWasReasoning = false;
+      const handleData = async (data: string) => {
+        let parsed: any;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          console.warn("Failed to parse chunk:", data);
+          return;
+        }
+        const choice = parsed.choices?.[0];
+        if (!choice) return;
+        if (choice.delta?.reasoning) {
+          throw new Error("different format");
+        }
+        const applied = applyStreamChoice(streamState, choice);
+        if (applied.reasoning) {
+          fullReasoning += applied.reasoning;
+          if (!options.silent) {
+            process.stdout.write(applied.reasoning);
+            lastStdoutWasReasoning = true;
+          }
+          if (options.onReasoningToken) {
+            await options.onReasoningToken(applied.reasoning);
+          }
+        } else if (applied.content) {
+          fullContent += applied.content;
+          if (!options.silent) {
+            if (lastStdoutWasReasoning) {
+              process.stdout.write("\n");
+              lastStdoutWasReasoning = false;
+            }
+            process.stdout.write(applied.content);
+          }
+          if (options.onToken) await options.onToken(applied.content);
+        }
+        if (
+          options.onStopReason &&
+          (choice.finish_reason === "tool_calls" || choice.finish_reason === "stop")
+        ) {
+          const timing: LlamaCppTimings = parsed.timings;
+          await options.onStopReason(choice.finish_reason, timing);
+        }
+      };
       while (true) {
         this.throwIfAborted(options.signal);
         const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split("\n").filter((l) => l.startsWith("data: "));
-        for (const line of lines) {
-          const data = line.slice(6);
-          if (data === "[DONE]") continue;
-          try {
-            const parsed = JSON.parse(data);
-            const choice = parsed.choices?.[0];
-            if (!choice) continue;
-            if (choice.finish_reason) {
-              const timing: LlamaCppTimings = parsed.timings;
-              finishReason = choice.finish_reason;
-              if (options.onStopReason) {
-                await options.onStopReason(choice.finish_reason, timing);
-              }
-              break;
-            }
-            const delta = choice.delta;
-            if (!delta) continue;
-            if (delta.tool_calls) {
-              for (const tc of delta.tool_calls) {
-                const i = tc.index;
-                if (!requestedToolCalls[i]) {
-                  requestedToolCalls[i] = {
-                    id: tc.id,
-                    type: "function",
-                    function: { name: tc.function?.name ?? "", arguments: "" },
-                  };
-                }
-                if (tc.function?.arguments) {
-                  requestedToolCalls[i].function.arguments +=
-                    tc.function.arguments;
-                }
-              }
-            }
-            if (delta.reasoning) {
-              throw new Error("different format");
-            }
-            if (delta.reasoning_content) {
-              fullReasoning += delta.reasoning_content;
-              if (!options.silent) {
-                process.stdout.write(delta.reasoning_content);
-                lastStdoutWasReasoning = true;
-              }
-              if (options.onReasoningToken) {
-                await options.onReasoningToken(delta.reasoning_content);
-              }
-            } else if (delta.content) {
-              fullContent += delta.content;
-              if (!options.silent) {
-                if (lastStdoutWasReasoning) {
-                  process.stdout.write("\n");
-                  lastStdoutWasReasoning = false;
-                }
-                process.stdout.write(delta.content);
-              }
-              if (options.onToken) await options.onToken(delta.content);
-            }
-          } catch {
-            console.warn("Failed to parse chunk:", data);
-            // skip malformed chunks
+        if (value) {
+          const chunk = decoder.decode(value, { stream: !done });
+          const consumed = consumeSseBuffer(sseBuffer, chunk);
+          sseBuffer = consumed.rest;
+          for (const data of consumed.events) {
+            await handleData(data);
           }
+        } else if (done) {
+          sseBuffer += decoder.decode();
         }
+        if (done) break;
       }
+      for (const data of flushSseBuffer(sseBuffer)) {
+        await handleData(data);
+      }
+      const finishReason = streamState.finishReason;
+      const requestedToolCalls = streamState.requestedToolCalls;
 
       if (fullReasoning)
         await pushHistory({ role: "reasoning", content: fullReasoning });
 
-      if (finishReason === "tool_calls") {
+      if (
+        finishReason === "tool_calls" ||
+        finishReason === "tool_use" ||
+        finishReason === "function_call"
+      ) {
         // Snapshot history length before pushing the assistant tool_calls message.
         // If we are aborted mid-tool-execution, we must roll back to keep the
         // conversation valid – an assistant message with tool_calls MUST be
@@ -285,8 +284,15 @@ export class LLMChatSession {
         try {
           for (const tc of Object.values(requestedToolCalls)) {
           if (!this.tools) continue;
-          const name = tc.function.name || "unknown";
-          const args = JSON.parse(tc.function.arguments);
+          const name = tc.function.name.trim();
+          if (!name) {
+            throw new Error(
+              `Unknown tool requested: missing tool name (${tc.function.arguments || "no arguments"})`,
+            );
+          }
+          const args = tc.function.arguments.trim()
+            ? JSON.parse(tc.function.arguments)
+            : {};
           const toolCallId = tc.id || crypto.randomUUID();
           const tool = this.tools.find((t) => t.name() === name);
           if (!tool) throw new Error(`Unknown tool requested: ${name}`);
@@ -439,6 +445,13 @@ export class LLMChatSession {
   }
   getHistory(): LLMHistoryItem[] {
     return structuredClone(this.history);
+  }
+
+  truncateHistory(index: number): void {
+    if (!Number.isInteger(index) || index < 0) {
+      return;
+    }
+    this.history.splice(index);
   }
 
   private throwIfAborted(signal?: AbortSignal): void {
