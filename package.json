@@ -1,6 +1,6 @@
 {
-  "name": "tabby-ai-agent",
-  "version": "1.0.5",
+  "name": "tabby-ai-agent-plus",
+  "version": "1.0.0",
   "description": "A Tabby terminal plugin that adds an AI assistant side panel to terminal tabs, with chat, terminal context sharing, and tools for reviewing and running terminal commands. The command approval mode is configurable in settings, and the panel shows each command, its risk level, and an explanation before execution. It can connect to cloud models or self-hosted OpenAI-compatible endpoints, which is the preferred option for users who want to keep terminal data on their own infrastructure.",
   "keywords": [
     "tabby-plugin"
@@ -18,16 +18,16 @@
   "files": [
     "dist"
   ],
-  "author": "",
+  "author": "mlxlx",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jvit/tabby-ai-agent.git"
+    "url": "git+https://github.com/4379711/tabby-ai-agent.git"
   },
   "bugs": {
-    "url": "https://github.com/jvit/tabby-ai-agent/issues"
+    "url": "https://github.com/4379711/tabby-ai-agent/issues"
   },
-  "homepage": "https://github.com/jvit/tabby-ai-agent#readme",
+  "homepage": "https://github.com/4379711/tabby-ai-agent#readme",
   "devDependencies": {
     "@angular/animations": "^15.2.10",
     "@angular/common": "^15.2.10",

@@ -1,4 +1,6 @@
-# Tabby AI Agent
+# Tabby AI Agent Plus
+
+This package is a fork of [tabby-ai-agent](https://github.com/jvit/tabby-ai-agent). The original MIT license and copyright notice are unchanged.
 
 <p align="center">
 	<img src="https://raw.githubusercontent.com/jvit/tabby-ai-agent/main/screenshot.png" alt="Tabby AI Agent screenshot" width="50%">
